@@ -2,7 +2,7 @@ import Link from "next/link";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentDeployments, workspaces } from "@/db/schema";
-import { ActionForm, SubmitButton } from "@/components/ui/action-form";
+import { ActionForm, FieldMsg, SubmitButton } from "@/components/ui/action-form";
 import { ButtonLink } from "@/components/ui/button";
 import { Checkbox, Field, Input, Select, Textarea } from "@/components/ui/field";
 import { Badge, Card, CardBody, CardHeader, EmptyState, Notice, PageHeader, StatusBadge } from "@/components/ui/kit";
@@ -95,17 +95,17 @@ export default async function Deploy({ searchParams }: { searchParams: Promise<{
         <Card className="max-w-3xl"><CardHeader title="3. Client profile" description={`The agent personalises analysis, ideas and metadata from this. Required by the blueprint: ${bp.config.requiredClientSettings.join(", ") || "none"}.`} />
           <CardBody>
             <ActionForm action={deploymentProfileAction} className="grid gap-4 sm:grid-cols-2">
-              {hidden}
-              <Field label="Channel niche" htmlFor="niche" required={bp.config.requiredClientSettings.includes("niche")}><Input id="niche" name="niche" defaultValue={profile.niche} placeholder={bp.config.exampleClientSettings?.niche as string} /></Field>
-              <Field label="Target audience" htmlFor="ta" required={bp.config.requiredClientSettings.includes("targetAudience")}><Input id="ta" name="targetAudience" defaultValue={profile.targetAudience} /></Field>
+              {hidden}<input type="hidden" name="required" value={bp.config.requiredClientSettings.join(",")} />
+              <Field label="Channel niche" htmlFor="niche" required={bp.config.requiredClientSettings.includes("niche")}><Input id="niche" name="niche" defaultValue={profile.niche} placeholder={bp.config.exampleClientSettings?.niche as string} /><FieldMsg name="niche" /></Field>
+              <Field label="Target audience" htmlFor="ta" required={bp.config.requiredClientSettings.includes("targetAudience")}><Input id="ta" name="targetAudience" defaultValue={profile.targetAudience} placeholder={bp.config.exampleClientSettings?.targetAudience as string} /><FieldMsg name="targetAudience" /></Field>
               <Field label="Audience problems (one per line)" htmlFor="ap"><Textarea id="ap" name="audienceProblems" rows={3} defaultValue={profile.audienceProblems.join("\n")} /></Field>
               <Field label="Preferred formats (one per line)" htmlFor="fm"><Textarea id="fm" name="formats" rows={3} defaultValue={profile.formats.join("\n")} placeholder={"tutorials\nreviews"} /></Field>
-              <Field label="Tone and personality" htmlFor="tone" required={bp.config.requiredClientSettings.includes("tone")}><Input id="tone" name="tone" defaultValue={profile.tone} /></Field>
+              <Field label="Tone and personality" htmlFor="tone" required={bp.config.requiredClientSettings.includes("tone")}><Input id="tone" name="tone" defaultValue={profile.tone} placeholder={bp.config.exampleClientSettings?.tone as string} /><FieldMsg name="tone" /></Field>
               <Field label="Publishing frequency" htmlFor="pf"><Input id="pf" name="publishingFrequency" defaultValue={profile.publishingFrequency} placeholder="Weekly" /></Field>
               <Field label="Content goals" htmlFor="goals" className="sm:col-span-2"><Textarea id="goals" name="goals" rows={2} defaultValue={profile.goals} /></Field>
               <Field label="Brand voice / editing preferences" htmlFor="bv"><Textarea id="bv" name="brandVoice" rows={2} defaultValue={profile.brandVoice} /></Field>
               <Field label="Topics to avoid (one per line)" htmlFor="av"><Textarea id="av" name="avoidTopics" rows={2} defaultValue={profile.avoidTopics.join("\n")} /></Field>
-              <div className="flex gap-2 sm:col-span-2"><SubmitButton>Save profile</SubmitButton>{next(4)}</div>
+              <div className="flex gap-2 sm:col-span-2"><SubmitButton pendingLabel="Saving…">Save & continue</SubmitButton></div>
             </ActionForm>
           </CardBody>
         </Card>
@@ -189,14 +189,14 @@ export default async function Deploy({ searchParams }: { searchParams: Promise<{
                 <Field label="Publishing mode" htmlFor="pm"><Select id="pm" name="publishMode" defaultValue={effective.modules.publishing.mode}><option value="manual">Manual</option><option value="approval">Approval-based (default)</option><option value="rule_based">Rule-based</option></Select></Field>
                 <Field label="Default visibility" htmlFor="pv"><Select id="pv" name="defaultPrivacy" defaultValue={effective.modules.publishing.defaultPrivacy}><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></Select></Field>
                 <p className="text-[12px] text-[var(--text-muted)]">Processing limits and retention live in the workspace&apos;s <Link className="text-[var(--brand)]" href={`/w/${ws.workspaceId}/settings`}>settings</Link>.</p></div>
-              <div className="flex gap-2 sm:col-span-3"><SubmitButton>Save configuration</SubmitButton>{next(6)}</div>
+              <div className="flex gap-2 sm:col-span-3"><SubmitButton pendingLabel="Saving…">Save & continue</SubmitButton></div>
             </ActionForm>
           </CardBody>
         </Card>
       )}
 
-      {step === 6 && <ChecksStep title="6. Validate requirements" description="Checks the configuration, profile, every required integration and scope, FFmpeg and the workflow graphs — for this client." action={validateDeploymentAction} hidden={hidden} checks={validation?.checks ?? null} cta="Run validation" nextLink={validation?.ok ? next(7) : null} />}
-      {step === 7 && <ChecksStep title="7. Test connections and a sample workflow" description="Tests each connection against its provider, runs FFmpeg on a generated clip, and dry-runs every workflow's branches for this client's configuration. Nothing is published and no client content is used." action={testDeploymentAction} hidden={hidden} checks={tests?.results ?? null} cta="Run tests" nextLink={tests ? next(8) : null} />}
+      {step === 6 && <ChecksStep title="6. Validate requirements" description="Checks the configuration, profile, every required integration and scope, FFmpeg and the workflow graphs — for this client." action={validateDeploymentAction} hidden={hidden} checks={validation?.checks ?? null} cta="Run validation" base={base} nextLink={validation?.ok ? next(7) : null} />}
+      {step === 7 && <ChecksStep title="7. Test connections and a sample workflow" description="Tests each connection against its provider, runs FFmpeg on a generated clip, and dry-runs every workflow's branches for this client's configuration. Nothing is published and no client content is used." action={testDeploymentAction} hidden={hidden} checks={tests?.results ?? null} cta="Run tests" base={base} nextLink={tests ? next(8) : null} />}
 
       {step === 8 && <ReviewStep wsId={ws.workspaceId} next={next(9)} />}
 
@@ -236,12 +236,20 @@ async function ReviewStep({ wsId, next }: { wsId: string; next: React.ReactNode 
   );
 }
 
-function ChecksStep({ title, description, action, hidden, checks, cta, nextLink }: { title: string; description: string; action: typeof validateDeploymentAction; hidden: React.ReactNode; checks: Check[] | null; cta: string; nextLink: React.ReactNode }) {
+/** Which wizard step resolves a failed check. */
+function fixStep(checkId: string): number | null {
+  if (checkId.startsWith("profile.")) return 3;
+  if (checkId.startsWith("int.") || checkId.startsWith("conn.")) return 4;
+  if (checkId === "config" || checkId === "publish.auth") return 5;
+  return null;
+}
+
+function ChecksStep({ title, description, action, hidden, checks, cta, nextLink, base }: { title: string; description: string; action: typeof validateDeploymentAction; hidden: React.ReactNode; checks: Check[] | null; cta: string; nextLink: React.ReactNode; base?: string }) {
   return (
     <Card><CardHeader title={title} description={description} action={<ActionForm action={action} showErrorBanner={false}>{hidden}<SubmitButton pendingLabel="Running…">{cta}</SubmitButton></ActionForm>} />
       {!checks ? <EmptyState compact icon="checkCircle" title="Not run yet" /> : (
         <ul className="divide-y divide-[var(--border)]">{checks.map((c) => (
-          <li key={c.id} className="flex items-start gap-3 px-5 py-3"><StatusBadge status={c.status} /><div className="min-w-0"><div className="text-[13.5px] font-medium">{c.label}</div><div className="text-[12.5px] text-[var(--text-muted)]">{c.message}</div></div></li>
+          <li key={c.id} className="flex items-start gap-3 px-5 py-3"><StatusBadge status={c.status} /><div className="min-w-0 flex-1"><div className="text-[13.5px] font-medium">{c.label}</div><div className="text-[12.5px] text-[var(--text-muted)]">{c.message}</div></div>{c.status !== "pass" && fixStep(c.id) && base && <Link className="shrink-0 text-[12.5px] font-medium text-[var(--brand)]" href={`${base}&step=${fixStep(c.id)}`}>Fix →</Link>}</li>
         ))}</ul>
       )}
       {nextLink && <CardBody className="border-t border-[var(--border)]">{nextLink}</CardBody>}

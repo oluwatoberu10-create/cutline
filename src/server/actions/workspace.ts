@@ -305,7 +305,7 @@ export async function disconnectAction(_: ActionState, fd: FormData): Promise<Ac
 /* ── deployment (agency) ──────────────────────────────────────────────── */
 
 export async function deploymentConfigAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  return act(async () => {
+  const r = await act(async () => {
     const ws = await wsCtx(fd, "agency");
     const overrides: Record<string, unknown> = {
       modules: {
@@ -314,20 +314,30 @@ export async function deploymentConfigAction(_: ActionState, fd: FormData): Prom
         publishing: { enabled: bool(fd, "publishing"), mode: str(fd, "publishMode") || "approval", defaultPrivacy: str(fd, "defaultPrivacy") || "private" },
       },
     };
-    await saveClientConfiguration(ws, { overrides, step: Number(str(fd, "step") || 0) || undefined });
-    return "Client configuration saved.";
+    await saveClientConfiguration(ws, { overrides, step: 6 });
   });
+  // Save & continue: move to validation only once the configuration is stored.
+  if (r.ok) redirect(`/agency/deploy?ws=${str(fd, "ws")}&step=6&saved=1`);
+  return r;
 }
 
+const PROFILE_LABELS: Record<string, string> = { niche: "Channel niche", targetAudience: "Target audience", tone: "Tone and personality", goals: "Content goals", brandVoice: "Brand voice", publishingFrequency: "Publishing frequency", audienceProblems: "Audience problems", formats: "Preferred formats" };
+
 export async function deploymentProfileAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  return act(async () => {
+  const r = await act(async () => {
     const ws = await wsCtx(fd, "agency");
-    await saveClientConfiguration(ws, {
-      profile: { niche: str(fd, "niche"), targetAudience: str(fd, "targetAudience"), audienceProblems: list(fd, "audienceProblems"), formats: list(fd, "formats"), tone: str(fd, "tone"), goals: str(fd, "goals"), brandVoice: str(fd, "brandVoice"), publishingFrequency: str(fd, "publishingFrequency"), avoidTopics: list(fd, "avoidTopics") },
-      step: 4,
-    });
-    return "Creator profile saved.";
+    const profile = { niche: str(fd, "niche"), targetAudience: str(fd, "targetAudience"), audienceProblems: list(fd, "audienceProblems"), formats: list(fd, "formats"), tone: str(fd, "tone"), goals: str(fd, "goals"), brandVoice: str(fd, "brandVoice"), publishingFrequency: str(fd, "publishingFrequency"), avoidTopics: list(fd, "avoidTopics") };
+    // Fields the blueprint requires must be filled before moving on (validation re-checks them server-side).
+    const fieldErrors: Record<string, string> = {};
+    for (const key of str(fd, "required").split(",").filter(Boolean)) {
+      const v = profile[key as keyof typeof profile];
+      if (Array.isArray(v) ? v.length === 0 : !v) fieldErrors[key] = `${PROFILE_LABELS[key] ?? key} is required by this blueprint.`;
+    }
+    if (Object.keys(fieldErrors).length) return { ok: false, error: "Fill in the required fields to continue.", fieldErrors };
+    await saveClientConfiguration(ws, { profile, step: 4 });
   });
+  if (r.ok) redirect(`/agency/deploy?ws=${str(fd, "ws")}&step=4&saved=1`);
+  return r;
 }
 
 export async function bindAction(_: ActionState, fd: FormData): Promise<ActionState> {
