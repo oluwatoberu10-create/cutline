@@ -47,6 +47,15 @@ metadata draft. Monthly call limits are enforced per workspace.
 
 ## Storage
 
+**Google Drive (recommended on Vercel).** Enable the **Google Drive API** in the same Google Cloud
+project as the YouTube OAuth client. Then Agency → Integrations → *Connect Google Drive* makes one
+Drive folder the default storage for every client; a client can connect their own Drive in their
+workspace. With a folder link Cutline asks for full Drive access (`drive`, a restricted scope —
+fine for test users; public use needs Google verification); without a link it asks only for
+`drive.file` and creates a "Cutline Media" folder. Uploads stream straight into Drive in ordered
+parts. Drive has no anonymous signed URLs, so playback streams through `/api/media`. Personal
+Drives have 15 GB free.
+
 Local disk by default. S3-compatible (AWS S3, Cloudflare R2, Backblaze B2, MinIO) via `S3_*` or a
 per-client bucket connected in the workspace. Costs: storage + egress of your provider; footage
 is large (≈ 1–4 GB per hour of 1080p source).

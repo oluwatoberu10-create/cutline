@@ -3,18 +3,20 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { and, eq, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, or } from "drizzle-orm";
 import { db, type DbOrTx } from "@/db";
 import { agentDeployments, channels, connections, credentials, oauthStates } from "@/db/schema";
 import type { AgentConfig } from "@/lib/blueprint/schema";
 import { generateToken, hashToken } from "@/lib/crypto";
 import { errorMessage, forbidden, notConfigured, notFound, validationError } from "@/lib/errors";
 import { env } from "../env";
+import { googleAccessToken } from "../google-auth";
+import { DriveClient, parseFolderLink } from "../providers/gdrive";
 import { AnthropicLlm, MockLlm, OpenAiLlm, ProviderError, type LlmProvider } from "../providers/llm";
 import { mockLlmResponder, mockTranscriptScript } from "../providers/mock";
 import { DeepgramTranscription, MockTranscription, OpenAiTranscription, type TranscriptionProvider } from "../providers/transcription";
 import {
-  ReauthRequired, YouTubeApi, authorizationUrl, exchangeCode, pkcePair, refreshAccessToken, revokeToken, scopeNames, type OAuthTokens,
+  YouTubeApi, authorizationUrl, exchangeCode, pkcePair, revokeToken, scopeNames, type OAuthTokens,
 } from "../providers/youtube";
 import { decrypt, encrypt, readCredential, storeCredential, updateCredential } from "../secrets";
 import { defaultDriverId, driver, makeS3Driver, storageKey, type S3Secret, type S3Settings } from "../storage";
@@ -122,15 +124,20 @@ export async function startYouTubeOAuth(ws: WorkspaceCtx, scopes: string[], retu
  * Completes the OAuth flow. The state must exist, be unexpired, and belong to
  * the same signed-in user who started it; it is single-use.
  */
-export async function completeYouTubeOAuth(userId: string, state: string, code: string, fetchImpl: typeof fetch = fetch): Promise<{ workspaceId: string; returnTo: string; channelTitle: string }> {
+export async function completeYouTubeOAuth(userId: string, state: string, code: string, fetchImpl: typeof fetch = fetch): Promise<{ workspaceId: string | null; returnTo: string; channelTitle: string }> {
   const google = env.google();
-  if (!google) throw notConfigured("YouTube OAuth is not configured.");
+  if (!google) throw notConfigured("Google OAuth is not configured.");
   const [row] = await db.delete(oauthStates).where(eq(oauthStates.stateHash, hashToken(state))).returning();
   if (!row || row.expiresAt < new Date()) throw validationError("This sign-in link has expired. Start the connection again.");
   if (row.userId !== userId) throw forbidden("This sign-in was started by a different user.");
 
   const tokens = await exchangeCode({ clientId: google.clientId, clientSecret: google.clientSecret, redirectUri: env.appUrl() + OAUTH_REDIRECT_PATH, code, verifier: decrypt(row.codeVerifierCiphertext) }, fetchImpl);
   if (!tokens.refresh_token) throw validationError("Google did not return a refresh token. Remove the app's access in your Google account settings and connect again.");
+  if (row.provider === "google_drive") {
+    const label = await completeDrive(row, userId, tokens, fetchImpl);
+    return { workspaceId: row.workspaceId, returnTo: row.returnTo, channelTitle: label };
+  }
+  if (!row.workspaceId) throw validationError("This YouTube sign-in is not linked to a workspace.");
   const api = new YouTubeApi({ kind: "oauth", token: async () => tokens.access_token }, fetchImpl);
   const chans = await api.myChannels();
   if (!chans.length) throw validationError("That Google account has no YouTube channel.");
@@ -165,23 +172,75 @@ export async function completeYouTubeOAuth(userId: string, state: string, code: 
   return { workspaceId: row.workspaceId, returnTo: row.returnTo, channelTitle: channel.title };
 }
 
-/** A valid access token for a YouTube connection, refreshing it when close to expiry. */
-async function youtubeAccessToken(c: Connection, fetchImpl: typeof fetch = fetch): Promise<string> {
-  if (!c.credentialId) throw notConfigured("The YouTube connection has no stored authorisation. Reconnect the channel.");
-  const tokens = await readCredential<OAuthTokens>(c.credentialId);
-  if (tokens.expires_at > Date.now() + 60_000) return tokens.access_token;
+/* ── Google Drive (media storage) ─────────────────────────────────────── */
+
+/**
+ * Starts connecting Google Drive as media storage — for one workspace, or for
+ * the whole agency when `workspaceId` is null (the default for every client
+ * without storage of its own). With a folder link, full Drive access is
+ * requested so Cutline can write into that existing folder; without one, only
+ * `drive.file` is requested and Cutline creates its own folder.
+ */
+export async function startDriveOAuth(scope: { orgId: string; workspaceId: string | null; actorId: string | null }, folderLink: string, returnTo: string): Promise<string> {
   const google = env.google();
-  if (!google) throw notConfigured("YouTube OAuth is not configured on this installation.");
-  if (!tokens.refresh_token) throw new ReauthRequired();
-  try {
-    const next = await refreshAccessToken({ clientId: google.clientId, clientSecret: google.clientSecret, refreshToken: tokens.refresh_token }, fetchImpl);
-    await updateCredential(db, c.credentialId, { ...tokens, ...next });
-    return next.access_token;
-  } catch (err) {
-    if (err instanceof ReauthRequired) await db.update(connections).set({ status: "error", lastError: err.message }).where(eq(connections.id, c.id));
-    throw err;
-  }
+  if (!google) throw notConfigured("Google sign-in is not set up on this installation. Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.");
+  if (!scope.actorId) throw forbidden();
+  const folderId = folderLink.trim() ? parseFolderLink(folderLink) : null;
+  if (folderLink.trim() && !folderId) throw validationError("That does not look like a Google Drive folder link. Open the folder in Drive and copy the address (…/drive/folders/…).");
+  const scopes = [folderId ? "drive" : "drive.file"];
+  const state = generateToken(32);
+  const { verifier, challenge } = pkcePair();
+  await db.delete(oauthStates).where(lt(oauthStates.expiresAt, new Date()));
+  await db.insert(oauthStates).values({
+    stateHash: hashToken(state), workspaceId: scope.workspaceId, orgId: scope.orgId, userId: scope.actorId, provider: "google_drive",
+    codeVerifierCiphertext: encrypt(verifier), scopes, options: { folderId }, returnTo, expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  });
+  return authorizationUrl({ clientId: google.clientId, redirectUri: env.appUrl() + OAUTH_REDIRECT_PATH, state, challenge, scopes });
 }
+
+async function completeDrive(row: typeof oauthStates.$inferSelect, userId: string, tokens: OAuthTokens, fetchImpl: typeof fetch): Promise<string> {
+  const client = new DriveClient(async () => tokens.access_token, fetchImpl);
+  const chosen = (row.options as { folderId?: string | null }).folderId ?? null;
+  let orgId = row.orgId, wsName: string | null = null;
+  if (row.workspaceId) {
+    const { systemWorkspace } = await import("../tenancy");
+    const w = await systemWorkspace(row.workspaceId);
+    orgId = w.orgId; wsName = w.workspaceName;
+  }
+  if (!orgId) throw validationError("This Drive sign-in is not linked to an agency.");
+  let folder: { id: string; name: string };
+  if (chosen) {
+    const f = await client.folder(chosen);
+    if (!f.canAdd) throw validationError(`You can view “${f.name}” but not add files to it. Ask its owner for edit access, or use another folder.`);
+    folder = f;
+  } else {
+    folder = await client.createFolder(wsName ? `Cutline Media – ${wsName}` : "Cutline Media");
+  }
+  const email = await client.accountEmail().catch(() => null);
+  const label = `Google Drive · ${folder.name}`;
+  await db.transaction(async (tx) => {
+    const credentialId = await storeCredential(tx, { orgId: orgId!, workspaceId: row.workspaceId, kind: "oauth_tokens", secret: tokens });
+    const [c] = await tx.insert(connections).values({
+      orgId: orgId!, workspaceId: row.workspaceId, kind: "storage", provider: "google_drive", label, status: "connected",
+      externalAccountId: folder.id, externalAccountName: email ?? folder.name, scopes: row.scopes, config: { folderId: folder.id, folderName: folder.name },
+      credentialId, createdBy: userId, lastCheckedAt: new Date(),
+    }).returning();
+    await audit({ orgId: orgId!, workspaceId: row.workspaceId, actorId: userId, action: "integration.connect", entityType: "connection", entityId: c.id, summary: `Connected ${label}${row.workspaceId ? "" : " as the agency's default media storage"}` }, tx);
+  });
+  return label;
+}
+
+/** The agency's default Drive, used by workspaces without storage of their own. */
+async function agencyStorage(orgId: string): Promise<Connection | null> {
+  const [c] = await db.select().from(connections).where(and(eq(connections.orgId, orgId), isNull(connections.workspaceId), eq(connections.kind, "storage"), isNull(connections.revokedAt)))
+    .orderBy(desc(connections.createdAt)).limit(1);
+  return c ?? null;
+}
+
+const storageId = (c: Connection) => (c.provider === "google_drive" ? `gdrive:${c.id}` : `s3:${c.id}`);
+
+/** A valid access token for a YouTube connection, refreshing it when close to expiry. */
+const youtubeAccessToken = (c: Connection, fetchImpl: typeof fetch = fetch) => googleAccessToken(c, fetchImpl);
 
 /* ── resolution: logical refs → this workspace's providers ────────────── */
 
@@ -250,8 +309,10 @@ export function publicYouTube(fetchImpl: typeof fetch = fetch): YouTubeApi {
 
 /** Where new media for this workspace is stored: its bound bucket, else the installation default. */
 export async function storageDriverIdFor(ws: WorkspaceCtx): Promise<string> {
-  const c = await resolveConnection(ws, "media_storage", "storage");
-  return c ? `s3:${c.id}` : defaultDriverId();
+  const own = await resolveConnection(ws, "media_storage", "storage");
+  if (own) return storageId(own);
+  const shared = await agencyStorage(ws.orgId);
+  return shared ? storageId(shared) : defaultDriverId();
 }
 
 /* ── testing & disconnecting ──────────────────────────────────────────── */
@@ -274,7 +335,7 @@ async function runConnectionCheck(ws: WorkspaceCtx, c: Connection): Promise<Chec
       return { ok: chans.length > 0, message: chans.length ? `Authorised for "${chans[0].title}". Scopes: ${c.scopes.join(", ")}` : "No channel on this account.", details: { scopes: c.scopes } };
     }
     if (c.kind === "storage") {
-      const d = makeS3Driver(`s3:${c.id}`, c.config as S3Settings, await readCredential<S3Secret>(c.credentialId!));
+      const d = c.provider === "google_drive" ? await driver(storageId(c)) : makeS3Driver(`s3:${c.id}`, c.config as S3Settings, await readCredential<S3Secret>(c.credentialId!));
       const key = storageKey(ws.workspaceId, "uploads", randomUUID(), "healthcheck.txt");
       const dir = join(env.scratchDir(), "checks");
       await mkdir(dir, { recursive: true });
@@ -309,7 +370,7 @@ export async function disconnect(ws: WorkspaceCtx, id: string): Promise<{ upstre
   const c = await loadConnection(ws, id);
   if (c.workspaceId === null) throw forbidden("Agency-shared integrations are managed from the agency Integrations page.");
   let upstreamRevoked = false;
-  if (c.kind === "youtube" && c.credentialId) {
+  if ((c.kind === "youtube" || c.provider === "google_drive") && c.credentialId) {
     try {
       const t = await readCredential<OAuthTokens>(c.credentialId);
       upstreamRevoked = await revokeToken(t.refresh_token ?? t.access_token);
@@ -326,6 +387,9 @@ export async function disconnect(ws: WorkspaceCtx, id: string): Promise<{ upstre
 export async function disconnectShared(orgId: string, actorId: string, id: string): Promise<void> {
   const [c] = await db.select().from(connections).where(and(eq(connections.id, id), eq(connections.orgId, orgId), isNull(connections.workspaceId))).limit(1);
   if (!c) throw notFound("Connection not found.");
+  if (c.provider === "google_drive" && c.credentialId) {
+    try { const t = await readCredential<OAuthTokens>(c.credentialId); await revokeToken(t.refresh_token ?? t.access_token); } catch { /* still remove locally */ }
+  }
   await db.transaction(async (tx) => {
     await tx.update(connections).set({ status: "revoked", revokedAt: new Date(), credentialId: null }).where(eq(connections.id, c.id));
     if (c.credentialId) await tx.delete(credentials).where(eq(credentials.id, c.credentialId));

@@ -159,3 +159,15 @@ export async function saveOrgSettingsAction(_: ActionState, fd: FormData): Promi
     return "Settings saved. New client workspaces start from these limits.";
   });
 }
+
+/** Connects the agency's Google Drive as the default media storage for every client without storage of its own. */
+export async function connectAgencyDriveAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  let url = "";
+  const r = await act(async () => {
+    const o = await orgCtx();
+    const { startDriveOAuth } = await import("../services/integrations");
+    url = await startDriveOAuth({ orgId: o.orgId, workspaceId: null, actorId: o.actorId }, str(fd, "folderLink"), "/agency/integrations");
+  });
+  if (r.ok) redirect(url);
+  return r;
+}

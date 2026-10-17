@@ -409,3 +409,16 @@ export async function deleteWorkspaceAction(_: ActionState, fd: FormData): Promi
   if (r.ok) redirect("/agency/clients?deleted=1");
   return r;
 }
+
+/* ── Google Drive storage ─────────────────────────────────────────────── */
+
+export async function connectDriveAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  let url = "";
+  const r = await act(async () => {
+    const ws = await wsCtx(fd, "approve");
+    const { startDriveOAuth } = await import("../services/integrations");
+    url = await startDriveOAuth({ orgId: ws.orgId, workspaceId: ws.workspaceId, actorId: ws.actorId }, str(fd, "folderLink"), safeInternalPath(str(fd, "returnTo"), `/w/${ws.workspaceId}/integrations`));
+  });
+  if (r.ok) redirect(url);
+  return r;
+}

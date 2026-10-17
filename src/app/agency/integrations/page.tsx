@@ -1,7 +1,7 @@
 import { ActionForm, ConfirmSubmit, SubmitButton } from "@/components/ui/action-form";
 import { Field, Input, Select } from "@/components/ui/field";
 import { Badge, Card, CardBody, CardHeader, EmptyState, Notice, PageHeader, StatusBadge, Timestamp } from "@/components/ui/kit";
-import { addSharedProviderAction, removeSharedProviderAction, testSharedProviderAction } from "@/server/actions/agency";
+import { addSharedProviderAction, connectAgencyDriveAction, removeSharedProviderAction, testSharedProviderAction } from "@/server/actions/agency";
 import { pageOrg } from "@/server/page-ctx";
 import { env } from "@/server/env";
 import { versions } from "@/server/media/ffmpeg";
@@ -11,14 +11,16 @@ export const metadata = { title: "Integrations" };
 
 export default async function AgencyIntegrations() {
   const org = await pageOrg();
-  const [shared, ff] = await Promise.all([listOrgConnections(org.orgId), versions()]);
+  const [all, ff] = await Promise.all([listOrgConnections(org.orgId), versions()]);
+  const shared = all.filter((c) => c.kind !== "storage");
+  const drives = all.filter((c) => c.kind === "storage" && c.provider === "google_drive");
   const s = env.storage();
   const installation: [string, boolean, string][] = [
     ["YouTube OAuth client", Boolean(env.google()), env.google() ? `Redirect URI: ${env.appUrl()}/api/oauth/google/callback` : "Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"],
     ["YouTube API key (public research)", Boolean(env.youtubeApiKey()), env.youtubeApiKey() ? "Set" : "Optional: YOUTUBE_API_KEY enables public-channel lookup"],
     ["FFmpeg", Boolean(ff.ffmpeg), ff.ffmpeg ?? "Not found on PATH (FFMPEG_PATH)"],
     ["FFprobe", Boolean(ff.ffprobe), ff.ffprobe ?? "Not found on PATH (FFPROBE_PATH)"],
-    ["Media storage", s.driver === "local" || Boolean(s.s3.bucket), s.driver === "local" ? `Local disk (${s.localDir})` : `S3 bucket ${s.s3.bucket ?? "(missing S3_BUCKET)"}`],
+    ["Media storage", drives.length > 0 || (s.driver === "s3" ? Boolean(s.s3.bucket) : !env.onVercel()), drives.length ? `Google Drive (${drives[0].label.replace("Google Drive · ", "")})` : s.driver === "s3" ? `S3 bucket ${s.s3.bucket ?? "(missing S3_BUCKET)"}` : env.onVercel() ? "Not configured — connect Google Drive below" : `Local disk (${s.localDir})`],
     ["Installation Anthropic key", Boolean(env.anthropicKey()), env.anthropicKey() ? "Set (ANTHROPIC_API_KEY)" : "Not set"],
     ["Installation OpenAI key", Boolean(env.openaiKey()), env.openaiKey() ? "Set (OPENAI_API_KEY)" : "Not set"],
     ["Installation Deepgram key", Boolean(env.deepgramKey()), env.deepgramKey() ? "Set (DEEPGRAM_API_KEY)" : "Not set"],
@@ -27,6 +29,30 @@ export default async function AgencyIntegrations() {
     <>
       <PageHeader title="Integrations" description="What this installation provides, and AI providers the agency can share with client workspaces. Each client's YouTube account and storage are always their own." />
       <div className="grid gap-6 lg:grid-cols-2">
+        <Card className="lg:col-span-2">
+          <CardHeader title="Google Drive — default media storage" description="Footage, previews and renders for every client without storage of its own are kept in this Drive folder. A client can still connect their own Drive or bucket in their workspace." />
+          <CardBody className="space-y-4">
+            {drives.length > 0 && (
+              <ul className="divide-y divide-[var(--border)] rounded-[var(--radius-field)] border border-[var(--border)]">
+                {drives.map((c, i) => (
+                  <li key={c.id} className="flex flex-wrap items-center gap-2 px-4 py-3">
+                    <div className="min-w-0 flex-1"><div className="text-[13.5px] font-medium">{c.label} {i === 0 && <Badge tone="brand">in use</Badge>}</div><div className="text-[12px] text-[var(--text-muted)]">{c.externalAccountName} · {c.scopes.includes("drive") ? "full Drive access (your folder)" : "Cutline's own folder only"} · checked <Timestamp value={c.lastCheckedAt} />{c.lastError ? ` · ${c.lastError}` : ""}</div></div>
+                    <StatusBadge status={c.status} />
+                    <ActionForm action={testSharedProviderAction} showErrorBanner={false}><input type="hidden" name="id" value={c.id} /><SubmitButton size="sm" variant="secondary">Test</SubmitButton></ActionForm>
+                    <ActionForm action={removeSharedProviderAction} showErrorBanner={false}><input type="hidden" name="id" value={c.id} /><ConfirmSubmit title="Disconnect this Drive?" description="Cutline loses access to media stored there (files stay in your Drive). New uploads need another storage connection." confirmLabel="Disconnect">Disconnect</ConfirmSubmit></ActionForm>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {env.google() ? (
+              <ActionForm action={connectAgencyDriveAction} className="flex flex-wrap items-end gap-3">
+                <Field label="Drive folder link (optional)" htmlFor="folderLink" className="min-w-72 flex-1" hint="Paste a folder you can edit (…/drive/folders/…). Leave empty and Cutline creates a “Cutline Media” folder and can only see its own files."><Input id="folderLink" name="folderLink" placeholder="https://drive.google.com/drive/folders/…" /></Field>
+                <SubmitButton>{drives.length ? "Connect another Drive" : "Connect Google Drive"}</SubmitButton>
+              </ActionForm>
+            ) : <Notice tone="warning">Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET first.</Notice>}
+            <p className="text-[12px] text-[var(--text-muted)]">Requires the <strong>Google Drive API</strong> to be enabled in the same Google Cloud project as your YouTube OAuth client.</p>
+          </CardBody>
+        </Card>
         <Card>
           <CardHeader title="This installation" description="Read from environment variables. Values are never displayed." />
           <ul className="divide-y divide-[var(--border)]">

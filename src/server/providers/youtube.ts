@@ -25,6 +25,8 @@ export const SCOPE_URLS: Record<string, string> = {
   "yt-analytics.readonly": "https://www.googleapis.com/auth/yt-analytics.readonly",
   "youtube.upload": "https://www.googleapis.com/auth/youtube.upload",
   "youtube.force-ssl": "https://www.googleapis.com/auth/youtube.force-ssl",
+  "drive.file": "https://www.googleapis.com/auth/drive.file",
+  drive: "https://www.googleapis.com/auth/drive",
 };
 
 export function scopeNames(granted: string): string[] {

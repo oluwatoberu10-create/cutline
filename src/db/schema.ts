@@ -169,10 +169,15 @@ export const connections = pgTable("connections", {
 /** Short-lived OAuth state for the authorization-code + PKCE flow. */
 export const oauthStates = pgTable("oauth_states", {
   stateHash: text().primaryKey(),
-  workspaceId: uuid().notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  /** Set for workspace connections (YouTube, a client's own Drive). */
+  workspaceId: uuid().references(() => workspaces.id, { onDelete: "cascade" }),
+  /** Set for agency-level connections (the agency's default Drive). */
+  orgId: uuid().references(() => organizations.id, { onDelete: "cascade" }),
   userId: uuid().notNull().references(() => users.id, { onDelete: "cascade" }),
   provider: text().notNull(),
   codeVerifierCiphertext: text().notNull(),
+  /** Provider-specific options chosen before consent (e.g. a Drive folder id). */
+  options: jsonb().notNull().default({}),
   scopes: text().array().notNull(),
   returnTo: text().notNull(),
   expiresAt: ts().notNull(),
@@ -387,6 +392,8 @@ export const uploadSessions = pgTable("upload_sessions", {
   chunkBytes: integer().notNull(),
   totalParts: integer().notNull(),
   receivedParts: integer().array().notNull().default(sql`'{}'::integer[]`),
+  /** Storage backends that accept parts directly (Google Drive) keep their session here, encrypted. */
+  remoteSessionCiphertext: text(),
   status: text().notNull().default("open"),
   expiresAt: ts().notNull(),
   createdAt: created(),

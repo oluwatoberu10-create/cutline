@@ -11,6 +11,7 @@ import { db } from "@/db";
 import { connections } from "@/db/schema";
 import { notConfigured, validationError } from "@/lib/errors";
 import { env } from "./env";
+import { DriveClient, driveName } from "./providers/gdrive";
 import { readCredential, sign, verifySignature } from "./secrets";
 
 /**
@@ -47,6 +48,76 @@ export interface StorageDriver {
   delete(key: string): Promise<void>;
   /** A direct, time-limited URL when the backend supports one. */
   presign(key: string, seconds: number, filename?: string): Promise<string | null>;
+  /**
+   * Backends that accept upload parts directly (no local assembly). Parts must
+   * arrive in order; used where the app runs on several stateless instances.
+   */
+  direct?: {
+    start(key: string, size: number, contentType: string): Promise<string>;
+    part(session: string, body: Uint8Array, offset: number, total: number): Promise<{ done: boolean; received: number }>;
+    status(session: string, total: number): Promise<{ done: boolean; received: number }>;
+  };
+}
+
+/** Google Drive: one folder, one file per storage key. */
+class GDriveDriver implements StorageDriver {
+  private ids = new Map<string, string>();
+  constructor(readonly id: string, private client: DriveClient, private folderId: string) {}
+
+  private async fileId(key: string): Promise<string> {
+    assertKey(key);
+    const cached = this.ids.get(key);
+    if (cached) return cached;
+    const f = await this.client.find(this.folderId, driveName(key));
+    if (!f) throw new Error(`Stored file not found in Google Drive (${key.split("/").pop()}).`);
+    this.ids.set(key, f.id);
+    return f.id;
+  }
+
+  async putFile(key: string, path: string, contentType: string): Promise<void> {
+    assertKey(key);
+    const existing = await this.client.find(this.folderId, driveName(key));
+    if (existing) await this.client.remove(existing.id); // keys are overwritten, never duplicated
+    this.ids.set(key, await this.client.uploadFile(this.folderId, driveName(key), path, contentType));
+    await rm(path, { force: true });
+  }
+
+  async toLocalFile(key: string, scratchPath: string): Promise<string> {
+    await mkdir(dirname(scratchPath), { recursive: true });
+    await pipeline(await this.client.download(await this.fileId(key)), createWriteStream(scratchPath));
+    return scratchPath;
+  }
+
+  async readStream(key: string, range?: { start: number; end: number }): Promise<Readable> {
+    return this.client.download(await this.fileId(key), range);
+  }
+
+  async size(key: string): Promise<number> {
+    assertKey(key);
+    const f = await this.client.find(this.folderId, driveName(key));
+    if (!f) throw new Error("Stored file not found in Google Drive.");
+    return f.size;
+  }
+
+  async delete(key: string): Promise<void> {
+    assertKey(key);
+    const f = await this.client.find(this.folderId, driveName(key));
+    if (f) await this.client.remove(f.id);
+    this.ids.delete(key);
+  }
+
+  async presign(): Promise<string | null> {
+    return null; // Drive has no anonymous signed URLs; media is streamed through /api/media.
+  }
+
+  direct = {
+    start: async (key: string, size: number, contentType: string) => {
+      assertKey(key);
+      return this.client.startUpload(this.folderId, driveName(key), size, contentType);
+    },
+    part: (session: string, body: Uint8Array, offset: number, total: number) => this.client.putChunk(session, body, offset, total),
+    status: (session: string, total: number) => this.client.sessionStatus(session, total),
+  };
 }
 
 class LocalDriver implements StorageDriver {
@@ -164,6 +235,15 @@ export async function driver(id: string): Promise<StorageDriver> {
     const s = env.storage().s3;
     if (!s.bucket || !s.accessKeyId || !s.secretAccessKey) throw notConfigured("STORAGE_DRIVER=s3 needs S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY.");
     return (envS3 = makeS3Driver("s3", { bucket: s.bucket, region: s.region, endpoint: s.endpoint, forcePathStyle: s.forcePathStyle }, { accessKeyId: s.accessKeyId, secretAccessKey: s.secretAccessKey }));
+  }
+  const g = /^gdrive:([0-9a-f-]{36})$/.exec(id);
+  if (g) {
+    const [conn] = await db.select().from(connections).where(and(eq(connections.id, g[1]), isNull(connections.revokedAt))).limit(1);
+    if (!conn?.credentialId) throw notConfigured("The Google Drive connection for this media has been removed. Reconnect Google Drive.");
+    const { googleAccessToken } = await import("./google-auth");
+    const folderId = (conn.config as { folderId?: string }).folderId;
+    if (!folderId) throw notConfigured("The Google Drive connection has no folder. Reconnect Google Drive.");
+    return new GDriveDriver(id, new DriveClient(() => googleAccessToken(conn)), folderId);
   }
   const m = /^s3:([0-9a-f-]{36})$/.exec(id);
   if (!m) throw new Error(`Unknown storage driver "${id}".`);

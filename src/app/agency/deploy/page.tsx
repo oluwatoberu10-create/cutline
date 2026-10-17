@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { blueprintSchema } from "@/lib/blueprint/schema";
 import { startDeploymentAction } from "@/server/actions/agency";
 import {
-  activateAction, addProviderAction, addS3Action, bindAction, connectYouTubeAction, deploymentConfigAction, deploymentProfileAction, testDeploymentAction, validateDeploymentAction,
+  activateAction, addProviderAction, addS3Action, bindAction, connectDriveAction, connectYouTubeAction, deploymentConfigAction, deploymentProfileAction, testDeploymentAction, validateDeploymentAction,
 } from "@/server/actions/workspace";
 import { pageActor } from "@/server/auth";
 import { env } from "@/server/env";
@@ -152,7 +152,15 @@ export default async function Deploy({ searchParams }: { searchParams: Promise<{
                       <div className="sm:col-span-2"><SubmitButton variant="secondary">Add the client's key</SubmitButton></div>
                     </ActionForm>
                   )}
-                  {i.kind === "storage" && <p className="text-[12.5px] text-[var(--text-muted)]">Leave on Automatic to use this installation&apos;s storage, or connect the client&apos;s own S3-compatible bucket:</p>}
+                  {i.kind === "storage" && <p className="text-[12.5px] text-[var(--text-muted)]">Leave on Automatic to use the agency&apos;s storage (Agency → Integrations → Google Drive), or connect the client&apos;s own Google Drive:</p>}
+                  {i.kind === "storage" && env.google() && (
+                    <ActionForm action={connectDriveAction} className="flex flex-wrap gap-2">
+                      {hidden}<input type="hidden" name="returnTo" value={`${base}&step=4`} />
+                      <Input name="folderLink" placeholder="Drive folder link (optional)" aria-label="Drive folder link" className="min-w-48 flex-1" />
+                      <SubmitButton variant="secondary">Connect client&apos;s Drive</SubmitButton>
+                    </ActionForm>
+                  )}
+                  {i.kind === "storage" && <p className="text-[12px] text-[var(--text-muted)]">…or an S3-compatible bucket:</p>}
                   {i.kind === "storage" && (
                     <ActionForm action={addS3Action} resetOnSuccess className="grid gap-2 sm:grid-cols-2">
                       {hidden}<input type="hidden" name="label" value={`${ws.workspaceName} bucket`} />

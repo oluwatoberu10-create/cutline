@@ -12,6 +12,7 @@ import { conflict, notFound, validationError } from "@/lib/errors";
 import { env } from "../env";
 import { enqueue } from "../jobs/queue";
 import { assertAcceptableMedia, detectSilences, ffmpeg, probe, proxyArgs, speechAudioArgs, thumbnailArgs } from "../media/ffmpeg";
+import { decrypt, encrypt } from "../secrets";
 import { driver, signedMediaPath, storageKey, type MediaVariant } from "../storage";
 import type { WorkspaceCtx } from "../tenancy";
 import { effectiveConfig } from "./agent-config";
@@ -61,16 +62,19 @@ export async function createUpload(ws: WorkspaceCtx, input: { filename: string; 
 
   const assetId = randomUUID();
   const driverId = await storageDriverIdFor(ws);
-  await driver(driverId); // fails fast with a setup message when storage is unusable
+  const store = await driver(driverId); // fails fast with a setup message when storage is unusable
+  const key = storageKey(ws.workspaceId, "assets", assetId, `original.${ext}`);
+  // Backends that take parts directly (Google Drive) get their session now, so parts never touch local disk.
+  const remote = store.direct ? encrypt(await store.direct.start(key, input.size, type.mime)) : null;
   return db.transaction(async (tx) => {
     const [asset] = await tx.insert(mediaAssets).values({
       id: assetId, workspaceId: ws.workspaceId, projectId: input.projectId ?? null, kind: type.kind, role: input.role, status: "uploading",
       originalFilename: cleanName(input.filename), mimeType: type.mime, sizeBytes: input.size, storageDriver: driverId,
-      storageKey: storageKey(ws.workspaceId, "assets", assetId, `original.${ext}`), recordedAt: input.recordedAt ?? null, createdBy: ws.actorId,
+      storageKey: key, recordedAt: input.recordedAt ?? null, createdBy: ws.actorId,
     }).returning();
     const totalParts = Math.ceil(input.size / CHUNK_BYTES);
     const [session] = await tx.insert(uploadSessions).values({
-      workspaceId: ws.workspaceId, assetId, totalBytes: input.size, chunkBytes: CHUNK_BYTES, totalParts, expiresAt: new Date(Date.now() + 2 * 864e5),
+      workspaceId: ws.workspaceId, assetId, totalBytes: input.size, chunkBytes: CHUNK_BYTES, totalParts, remoteSessionCiphertext: remote, expiresAt: new Date(Date.now() + 2 * 864e5),
     }).returning();
     return { asset, uploadId: session.id, chunkBytes: CHUNK_BYTES, totalParts };
   });
@@ -96,6 +100,7 @@ export async function receivePart(ws: WorkspaceCtx, uploadId: string, part: numb
   if (!Number.isInteger(part) || part < 1 || part > s.totalParts) throw validationError("Invalid part number.");
   if (!body) throw validationError("Missing chunk body.");
   const expected = part === s.totalParts ? s.totalBytes - (s.totalParts - 1) * s.chunkBytes : s.chunkBytes;
+  if (s.remoteSessionCiphertext) return receiveRemotePart(ws, s, part, body, expected);
   const dir = scratch("uploads", s.id);
   await mkdir(dir, { recursive: true });
   const tmp = join(dir, `${part}.part.tmp`);
@@ -120,6 +125,26 @@ export async function receivePart(ws: WorkspaceCtx, uploadId: string, part: numb
   return { part, bytes: received };
 }
 
+/**
+ * Forwards a part straight to a direct-upload backend. Parts must arrive in
+ * order (the uploader sends them sequentially); a re-sent part that the
+ * backend already holds is acknowledged without sending it again.
+ */
+async function receiveRemotePart(ws: WorkspaceCtx, s: typeof uploadSessions.$inferSelect, part: number, body: ReadableStream<Uint8Array>, expected: number) {
+  const buf = new Uint8Array(await new Response(body).arrayBuffer());
+  if (buf.byteLength !== expected) throw validationError(`Chunk ${part} should be ${expected} bytes, got ${buf.byteLength}.`);
+  const [asset] = await db.select().from(mediaAssets).where(and(eq(mediaAssets.id, s.assetId), eq(mediaAssets.workspaceId, ws.workspaceId))).limit(1);
+  if (!asset) throw notFound("Asset not found.");
+  const d = (await driver(asset.storageDriver)).direct!;
+  const session = decrypt(s.remoteSessionCiphertext!);
+  const offset = (part - 1) * s.chunkBytes;
+  const st = await d.status(session, s.totalBytes);
+  if (st.received < offset) throw validationError(`Send part ${Math.floor(st.received / s.chunkBytes) + 1} first — parts go to storage in order.`);
+  if (st.received < offset + expected && !st.done) await d.part(session, buf, offset, s.totalBytes);
+  await db.update(uploadSessions).set({ receivedParts: sql`(select array_agg(distinct x) from unnest(array_append(${uploadSessions.receivedParts}, ${part}::int)) x)` }).where(eq(uploadSessions.id, s.id));
+  return { part, bytes: expected };
+}
+
 export async function completeUpload(ws: WorkspaceCtx, uploadId: string) {
   const s = await getSession(ws, uploadId);
   const have = new Set(s.receivedParts);
@@ -128,6 +153,11 @@ export async function completeUpload(ws: WorkspaceCtx, uploadId: string) {
 
   const [asset] = await db.select().from(mediaAssets).where(and(eq(mediaAssets.id, s.assetId), eq(mediaAssets.workspaceId, ws.workspaceId))).limit(1);
   if (!asset) throw notFound("Asset not found.");
+  if (s.remoteSessionCiphertext) {
+    const st = await (await driver(asset.storageDriver)).direct!.status(decrypt(s.remoteSessionCiphertext), s.totalBytes);
+    if (!st.done) throw validationError(`The storage provider has ${st.received} of ${s.totalBytes} bytes. Resume the upload.`);
+    return finishUpload(ws, s.id, asset, null, s.totalBytes);
+  }
   const dir = scratch("uploads", s.id);
   const assembled = join(dir, "assembled");
   const hash = createHash("sha256");
@@ -142,8 +172,12 @@ export async function completeUpload(ws: WorkspaceCtx, uploadId: string) {
   const d = await driver(asset.storageDriver);
   await d.putFile(asset.storageKey, assembled, asset.mimeType);
   await rm(dir, { recursive: true, force: true });
-  await db.update(uploadSessions).set({ status: "complete" }).where(eq(uploadSessions.id, s.id));
-  await db.update(mediaAssets).set({ status: "processing", sha256: hash.digest("hex"), sizeBytes: size }).where(eq(mediaAssets.id, asset.id));
+  return finishUpload(ws, s.id, asset, hash.digest("hex"), size);
+}
+
+async function finishUpload(ws: WorkspaceCtx, sessionId: string, asset: Asset, sha256: string | null, size: number) {
+  await db.update(uploadSessions).set({ status: "complete", remoteSessionCiphertext: null }).where(eq(uploadSessions.id, sessionId));
+  await db.update(mediaAssets).set({ status: "processing", sha256, sizeBytes: size }).where(eq(mediaAssets.id, asset.id));
   const job = await enqueue({ type: "media.ingest", workspaceId: ws.workspaceId, payload: { assetId: asset.id }, dedupeKey: `ingest:${asset.id}`, timeoutSeconds: 7200, createdBy: ws.actorId });
   await auditWs(ws, { action: "media.upload", entityType: "media_asset", entityId: asset.id, summary: `Uploaded "${asset.originalFilename}"` });
   return { assetId: asset.id, jobId: job.id };
@@ -174,6 +208,11 @@ export async function ingestAsset(ws: WorkspaceCtx, assetId: string, ctx: { jobI
       return { rejected: true };
     }
 
+    if (!asset.sha256) {
+      const h = createHash("sha256");
+      for await (const chunk of createReadStream(original)) h.update(chunk as Buffer);
+      await db.update(mediaAssets).set({ sha256: h.digest("hex") }).where(eq(mediaAssets.id, asset.id));
+    }
     const updates: Partial<Asset> = {
       probe: p.raw as object, durationSeconds: p.duration || null, width: p.width, height: p.height, fps: p.fps, hasVideo: p.hasVideo && !p.isStillImage, hasAudio: p.hasAudio,
     };

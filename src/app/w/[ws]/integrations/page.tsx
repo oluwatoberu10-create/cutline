@@ -1,7 +1,7 @@
 import { ActionForm, ConfirmSubmit, SubmitButton } from "@/components/ui/action-form";
 import { Checkbox, Input, Select } from "@/components/ui/field";
 import { Badge, Card, CardBody, CardHeader, EmptyState, Notice, PageHeader, SetupRequired, StatusBadge, Timestamp } from "@/components/ui/kit";
-import { addProviderAction, addS3Action, connectYouTubeAction, disconnectAction, testProviderAction } from "@/server/actions/workspace";
+import { addProviderAction, addS3Action, connectDriveAction, connectYouTubeAction, disconnectAction, testProviderAction } from "@/server/actions/workspace";
 import { env } from "@/server/env";
 import { pageWs } from "@/server/page-ctx";
 import { listConnections, publicConnection } from "@/server/services/integrations";
@@ -76,16 +76,25 @@ export default async function Integrations({ params, searchParams }: { params: P
           </CardBody>}
         </Card>
         <Card>
-          <CardHeader title="Media storage" description={`Default: ${env.storage().driver === "local" ? "this installation's disk" : "the installation's S3 bucket"}. Connect the client's own bucket to keep their footage in their account.`} />
+          <CardHeader title="Media storage" description="Default: the agency's storage. Connect the client's own Google Drive (or an S3-compatible bucket) to keep their footage in their account." />
           <List kind="storage" />
+          {manage && google && <CardBody className="border-t border-[var(--border)]">
+            <ActionForm action={connectDriveAction} className="flex flex-wrap items-end gap-2">{h}
+              <Input name="folderLink" placeholder="Drive folder link (optional)" aria-label="Drive folder link" className="min-w-56 flex-1" />
+              <SubmitButton>Connect Google Drive</SubmitButton>
+            </ActionForm>
+            <p className="mt-2 text-[12px] text-[var(--text-muted)]">Without a link, Cutline creates its own folder in that Drive.</p>
+          </CardBody>}
           {manage && <CardBody className="border-t border-[var(--border)]">
+            <details><summary className="cursor-pointer text-[13px] font-medium">Use an S3-compatible bucket instead</summary>
             <ActionForm action={addS3Action} resetOnSuccess className="grid gap-2 sm:grid-cols-2">{h}
               <Input name="label" placeholder="Label" aria-label="Label" /><Input name="bucket" placeholder="Bucket" aria-label="Bucket" required />
               <Input name="region" placeholder="Region" aria-label="Region" /><Input name="endpoint" placeholder="Endpoint (R2/MinIO, optional)" aria-label="Endpoint" />
               <Input name="accessKeyId" placeholder="Access key id" aria-label="Access key" autoComplete="off" /><Input name="secretAccessKey" type="password" placeholder="Secret" aria-label="Secret" autoComplete="off" />
               <Checkbox name="forcePathStyle" label="Path-style URLs" /><SubmitButton variant="secondary">Connect bucket</SubmitButton>
             </ActionForm>
-            <p className="mt-2 text-[12px] text-[var(--text-muted)]">New uploads use it once it is bound as <code className="mono">media_storage</code> (Agent → Bindings) or when it is the only bucket.</p>
+            </details>
+            <p className="mt-2 text-[12px] text-[var(--text-muted)]">New uploads go to this workspace's own storage when it has one, otherwise to the agency's.</p>
           </CardBody>}
         </Card>
       </div>
