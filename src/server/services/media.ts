@@ -29,7 +29,8 @@ const EXT: Record<string, { kind: "video" | "audio" | "image"; mime: string }> =
   png: { kind: "image", mime: "image/png" }, jpg: { kind: "image", mime: "image/jpeg" }, jpeg: { kind: "image", mime: "image/jpeg" }, webp: { kind: "image", mime: "image/webp" },
 };
 
-export const CHUNK_BYTES = 8 * 1024 * 1024;
+/** Vercel rejects request bodies over 4.5 MB, so parts are smaller there. */
+export const CHUNK_BYTES = (process.env.VERCEL ? 4 : 8) * 1024 * 1024;
 
 export function scratch(...parts: string[]): string {
   return join(env.scratchDir(), ...parts);
@@ -60,6 +61,7 @@ export async function createUpload(ws: WorkspaceCtx, input: { filename: string; 
 
   const assetId = randomUUID();
   const driverId = await storageDriverIdFor(ws);
+  await driver(driverId); // fails fast with a setup message when storage is unusable
   return db.transaction(async (tx) => {
     const [asset] = await tx.insert(mediaAssets).values({
       id: assetId, workspaceId: ws.workspaceId, projectId: input.projectId ?? null, kind: type.kind, role: input.role, status: "uploading",

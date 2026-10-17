@@ -6,6 +6,7 @@ import { driver, verifyMediaSignature } from "@/server/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 /**
  * Serves stored media through short-lived signed URLs (the signature binds

@@ -24,15 +24,20 @@
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "live:check": "tsx --conditions=react-server scripts/live-check.ts",
-    "test:e2e": "tsx --conditions=react-server scripts/e2e.ts"
+    "test:e2e": "tsx --conditions=react-server scripts/e2e.ts",
+    "vercel-build": "tsx scripts/migrate.ts && next build"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "0.135.0",
     "@aws-sdk/client-s3": "3.1152.0",
     "@aws-sdk/s3-request-presigner": "3.1152.0",
+    "@ffprobe-installer/ffprobe": "2.1.2",
     "drizzle-orm": "0.45.2",
     "fflate": "0.8.2",
+    "ffmpeg-static": "5.2.0",
     "next": "15.5.23",
     "pg": "8.16.3",
     "react": "19.2.8",
@@ -56,5 +61,7 @@
     "typescript": "5.9.3",
     "vitest": "3.2.4"
   },
-  "overrides": { "rollup": "4.62.5" }
+  "overrides": {
+    "rollup": "4.62.5"
+  }
 }

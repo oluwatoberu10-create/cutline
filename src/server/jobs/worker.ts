@@ -83,10 +83,10 @@ async function afterFinalFailure(job: Job, message: string) {
 }
 
 /** Processes jobs until the queue is empty (tests and one-shot runs). */
-export async function drain(opts: { workerId?: string; maxJobs?: number; until?: () => Promise<boolean> } = {}): Promise<number> {
+export async function drain(opts: { workerId?: string; maxJobs?: number; until?: () => Promise<boolean>; deadline?: number } = {}): Promise<number> {
   const id = opts.workerId ?? `drain-${process.pid}`;
   let n = 0;
-  while (n < (opts.maxJobs ?? 1000)) {
+  while (n < (opts.maxJobs ?? 1000) && (!opts.deadline || Date.now() < opts.deadline)) {
     const job = await claim(id);
     if (!job) break;
     await processJob(job);

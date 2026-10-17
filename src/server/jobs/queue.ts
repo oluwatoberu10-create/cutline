@@ -31,6 +31,7 @@ export type EnqueueOptions = {
 };
 
 export async function enqueue(opts: EnqueueOptions, conn: DbOrTx = db): Promise<Job> {
+  if (process.env.VERCEL) (await import("./inline")).kickInline();
   const inserted = await conn.insert(jobs).values({
     type: opts.type, payload: opts.payload ?? {}, workspaceId: opts.workspaceId ?? null, dedupeKey: opts.dedupeKey ?? null,
     maxAttempts: opts.maxAttempts ?? 3, timeoutSeconds: opts.timeoutSeconds ?? 900, runAt: opts.runAt ?? new Date(),

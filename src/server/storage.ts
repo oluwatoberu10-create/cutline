@@ -155,7 +155,10 @@ export function defaultDriverId(): string {
 }
 
 export async function driver(id: string): Promise<StorageDriver> {
-  if (id === "local") return localDriver();
+  if (id === "local") {
+    if (env.onVercel()) throw notConfigured("Media storage is not configured. Vercel has no persistent disk: set STORAGE_DRIVER=s3 with S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY (any S3-compatible service, e.g. Cloudflare R2), or connect a bucket in the workspace's Integrations.");
+    return localDriver();
+  }
   if (id === "s3") {
     if (envS3) return envS3;
     const s = env.storage().s3;

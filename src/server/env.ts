@@ -5,6 +5,20 @@ import "server-only";
  * null when unset so callers can show a setup message instead of failing.
  */
 
+function onVercel(): boolean {
+  return Boolean(process.env.VERCEL);
+}
+
+function bundled(which: "ffmpeg" | "ffprobe"): string | null {
+  try {
+    /* eslint-disable @typescript-eslint/no-require-imports -- resolved lazily, only on Vercel */
+    return which === "ffmpeg" ? (require("ffmpeg-static") as string) : (require("@ffprobe-installer/ffprobe") as { path: string }).path;
+    /* eslint-enable @typescript-eslint/no-require-imports */
+  } catch {
+    return null;
+  }
+}
+
 function opt(name: string): string | null {
   const v = process.env[name];
   return v && v.trim() ? v.trim() : null;
@@ -30,9 +44,12 @@ export const env = {
       forcePathStyle: opt("S3_FORCE_PATH_STYLE") === "true",
     },
   }),
-  ffmpegPath: () => opt("FFMPEG_PATH") ?? "ffmpeg",
-  ffprobePath: () => opt("FFPROBE_PATH") ?? "ffprobe",
-  scratchDir: () => opt("SCRATCH_DIR") ?? ".scratch",
+  /** On Vercel (no system FFmpeg) the bundled static binaries are used. */
+  ffmpegPath: () => opt("FFMPEG_PATH") ?? (onVercel() ? bundled("ffmpeg") : null) ?? "ffmpeg",
+  ffprobePath: () => opt("FFPROBE_PATH") ?? (onVercel() ? bundled("ffprobe") : null) ?? "ffprobe",
+  /** Vercel's filesystem is read-only except /tmp. */
+  scratchDir: () => opt("SCRATCH_DIR") ?? (onVercel() ? "/tmp/cutline-scratch" : ".scratch"),
+  onVercel: () => onVercel(),
   /** Test-only fake providers. Never enable in production. */
   mockProviders: () => opt("CUTLINE_ENABLE_MOCK_PROVIDERS") === "true" && process.env.NODE_ENV !== "production",
 };

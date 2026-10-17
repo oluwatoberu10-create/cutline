@@ -8,6 +8,9 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
+/** Server actions and inline job processing may run renders or transcription; allow up to 5 minutes. */
+export const maxDuration = 300;
+
 export const viewport: Viewport = { themeColor: [{ media: "(prefers-color-scheme: dark)", color: "#0d0d11" }, { color: "#f7f7f8" }] };
 
 // Applies a saved theme choice before paint to avoid a flash.

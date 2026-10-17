@@ -4,6 +4,7 @@ import { approvalRequests } from "@/db/schema";
 import { AppShell, type NavSection } from "@/components/shell";
 import { Notice } from "@/components/ui/kit";
 import { pageActor } from "@/server/auth";
+import { kickIfPending } from "@/server/jobs/inline";
 import { pageWs } from "@/server/page-ctx";
 import { accessibleWorkspaces, can } from "@/server/tenancy";
 
@@ -13,6 +14,7 @@ export default async function WorkspaceLayout({ children, params }: { children: 
   const { ws: id } = await params;
   const actor = await pageActor();
   const ws = await pageWs(id);
+  await kickIfPending();
   const [wss, [pending]] = await Promise.all([
     accessibleWorkspaces(actor),
     db.select({ n: count() }).from(approvalRequests).where(and(eq(approvalRequests.workspaceId, ws.workspaceId), eq(approvalRequests.status, "pending"))),

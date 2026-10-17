@@ -14,3 +14,10 @@ coverage/
 .media-e2e/
 .scratch-e2e/
 *.log
+
+.vercel
+.env*
+.agents/
+.claude/
+skills-lock.json
+.vercel
