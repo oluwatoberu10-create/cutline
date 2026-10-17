@@ -1,0 +1,43 @@
+# Cutline: web app + background worker + PostgreSQL (+ one-shot migrations).
+#   cp .env.example .env   # fill in values
+#   docker compose up -d --build
+#   docker compose exec web npm run admin:create -- --org "Agency" --email you@your-domain --name "You"
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cutline
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: cutline
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U cutline"], interval: 5s, retries: 20 }
+
+  migrate:
+    build: .
+    env_file: .env
+    environment: { DATABASE_URL: "postgresql://cutline:${POSTGRES_PASSWORD}@db:5432/cutline" }
+    command: ["npm", "run", "db:migrate"]
+    depends_on: { db: { condition: service_healthy } }
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment: { DATABASE_URL: "postgresql://cutline:${POSTGRES_PASSWORD}@db:5432/cutline", LOCAL_STORAGE_DIR: /data/media, SCRATCH_DIR: /data/scratch }
+    ports: ["3000:3000"]
+    volumes: [media:/data]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment: { DATABASE_URL: "postgresql://cutline:${POSTGRES_PASSWORD}@db:5432/cutline", LOCAL_STORAGE_DIR: /data/media, SCRATCH_DIR: /data/scratch, WORKER_CONCURRENCY: "2" }
+    command: ["npm", "run", "worker"]
+    volumes: [media:/data]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+volumes:
+  pgdata:
+  media:

@@ -1,0 +1,16 @@
+node_modules/
+.next/
+.env
+.env.local
+.pgdata/
+.pgdata.pw
+.media/
+.media-test/
+.scratch/
+.scratch-test/
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+.media-e2e/
+.scratch-e2e/
+*.log
