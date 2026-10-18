@@ -1,21 +1,25 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentDeployments, agentTemplates, blueprintVersions, deploymentRevisions, workspaces } from "@/db/schema";
 import { deepEqual, jsonDiff } from "@/lib/blueprint/diff";
 import { blueprintSchema, compareSemver, type AgentConfig, type Blueprint } from "@/lib/blueprint/schema";
+import { edlSchema, keepRanges } from "@/lib/edl";
 import { AppError, conflict, notFound, validationError } from "@/lib/errors";
+import { buildRenderPlan } from "@/lib/render-plan";
 import { evaluate } from "@/lib/workflow/condition";
 import { topoSort, validateWorkflow } from "@/lib/workflow/definition";
 import { nodeSpec } from "@/lib/workflow/nodes";
+import { env } from "../env";
 import { detectSilences, ffmpeg, probe, versions as ffVersions } from "../media/ffmpeg";
+import { driver, storageKey } from "../storage";
 import type { OrgCtx, WorkspaceCtx } from "../tenancy";
 import { mergeConfig } from "./agent-config";
 import { audit, auditWs } from "./audit";
-import { getLlm, getTranscriber, listConnections, resolveConnection, testConnection } from "./integrations";
+import { getLlm, getTranscriber, listConnections, resolveConnection, storageDriverIdFor, testConnection } from "./integrations";
 import { getProfile, updateProfile, type profileInput } from "./workspaces";
 import type { z } from "zod";
 
@@ -203,27 +207,68 @@ export async function testDeployment(ws: WorkspaceCtx) {
   const config = mergeConfig(bp.config, d.overrides);
   const results: Check[] = [];
 
+  // Each check is isolated: one failing provider is reported, never crashes the whole step.
+  const check = async (id: string, label: string, fn: () => Promise<{ ok: boolean; message: string }>) => {
+    try { const r = await fn(); results.push({ id, label, status: r.ok ? "pass" : "fail", message: r.message }); }
+    catch (e) { results.push({ id, label, status: "fail", message: e instanceof Error ? e.message : "Check failed." }); }
+  };
+
+  // 1. Every connection the agent will use, against its live provider.
   const seen = new Set<string>();
   for (const i of config.integrations) {
-    const c = await resolveConnection(ws, i.ref, i.kind);
+    if (i.kind === "storage") continue; // covered by the storage round trip below
+    const c = await resolveConnection(ws, i.ref, i.kind).catch(() => null);
     if (!c || seen.has(c.id)) continue;
     seen.add(c.id);
-    const r = await testConnection(ws, c.id);
-    results.push({ id: `conn.${c.id}`, label: `${i.ref}: ${c.label}`, status: r.ok ? "pass" : "fail", message: r.message });
+    await check(`conn.${c.id}`, `${i.ref}: ${c.label}`, () => testConnection(ws, c.id));
   }
 
-  const work = join(process.env.SCRATCH_DIR ?? ".scratch", "deploy-test", randomUUID());
-  await mkdir(work, { recursive: true });
+  const work = join(env.scratchDir(), "deploy-test", randomUUID());
   try {
-    const clip = join(work, "test.mp4");
-    await ffmpeg(["-hide_banner", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=3", "-f", "lavfi", "-i", "sine=frequency=440:duration=1.2", "-af", "apad=whole_dur=3", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", clip]);
-    const p = await probe(clip);
-    const sil = await detectSilences(clip, config.modules.editing.rules.silenceNoiseDb, 0.5);
-    results.push({ id: "media", label: "Media pipeline (FFmpeg)", status: p.hasVideo && p.hasAudio && sil.length > 0 ? "pass" : "fail", message: `Generated a ${p.duration.toFixed(1)}s test clip, probed it and detected ${sil.length} silence range(s).` });
-  } catch (e) {
-    results.push({ id: "media", label: "Media pipeline (FFmpeg)", status: "fail", message: e instanceof Error ? e.message : "FFmpeg test failed" });
+    await mkdir(work, { recursive: true });
+
+    // 2. The storage this client's media will really go to (their own, or the agency's Google Drive).
+    await check("storage", "media_storage: write, read and delete", async () => {
+      const id = await storageDriverIdFor(ws);
+      const store = await driver(id);
+      const key = storageKey(ws.workspaceId, "uploads", randomUUID(), "cutline-deploy-test.txt");
+      const file = join(work, "probe.txt");
+      await writeFile(file, "cutline deployment test");
+      await store.putFile(key, file, "text/plain");
+      const size = await store.size(key);
+      await store.delete(key);
+      const where = id.startsWith("gdrive:") ? "Google Drive" : id.startsWith("s3") ? "S3 bucket" : "local disk";
+      return { ok: size === 23, message: `Wrote, read and deleted a test file in ${where}.` };
+    });
+
+    // 3. A sample editing workflow on a generated clip: detect the pause, cut it, render, verify.
+    await check("media", "Sample workflow: pause detection → cut → render", async () => {
+      const clip = join(work, "sample.mp4");
+      // 6 s test pattern with a tone that goes silent from 2.0 s to 4.0 s.
+      await ffmpeg(["-hide_banner", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=6", "-f", "lavfi", "-i", "sine=frequency=440:duration=6:sample_rate=48000",
+        "-af", "volume='if(between(t,2,4),0,1)':eval=frame", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", clip]);
+      const src = await probe(clip);
+      const rules = config.modules.editing.rules;
+      const silences = (await detectSilences(clip, rules.silenceNoiseDb, rules.pauseThresholdSeconds)).filter((s) => s.end - s.start >= rules.pauseThresholdSeconds);
+      if (!silences.length) return { ok: false, message: "FFmpeg ran but found no pause in the sample clip." };
+      const removals = silences.map((s) => ({ start: s.start + rules.pausePaddingSeconds, end: s.end - rules.pausePaddingSeconds }));
+      const clips = keepRanges(src.duration, removals, rules.minClipSeconds).map((r, i) => ({ id: `c${i}`, sourceId: "s1", in: r.start, out: r.end }));
+      const preset = config.renderPresets.find((p) => p.id === config.modules.editing.presets.draft) ?? config.renderPresets[0];
+      const edl = edlSchema.parse({
+        version: 1, sources: [{ id: "s1", assetId: randomUUID() }], clips, output: { presetId: preset.id, reframe: "fit" },
+        audio: config.modules.editing.audio, transitions: config.modules.editing.transitions,
+        captions: { enabled: false, burnIn: false, style: config.modules.editing.captions.style, cues: [] },
+        branding: { logoAssetId: null, introAssetId: null, outroAssetId: null }, lowerThirds: [],
+      });
+      const plan = buildRenderPlan({ edl, preset: { ...preset, speed: "ultrafast" }, sources: { s1: { file: "sample.mp4", hasVideo: true, hasAudio: true, duration: src.duration } }, outputFile: `out.${preset.container}` });
+      await writeFile(join(work, "segments.txt"), plan.concatList);
+      for (const step of plan.steps) await ffmpeg(step.args, { cwd: work });
+      const out = await probe(join(work, `out.${preset.container}`));
+      const ok = out.hasVideo && out.hasAudio && Math.abs(out.duration - plan.timelineSeconds) < 1;
+      return { ok, message: `Detected a ${(silences[0].end - silences[0].start).toFixed(1)}s pause, cut it, and rendered a ${out.width}×${out.height} ${preset.label} draft: ${src.duration.toFixed(1)}s → ${out.duration.toFixed(1)}s.` };
+    });
   } finally {
-    await rm(work, { recursive: true, force: true });
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }
 
   for (const wf of config.workflows) {

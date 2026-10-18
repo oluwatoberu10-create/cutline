@@ -119,6 +119,9 @@ describe("blueprint: build once, export, import elsewhere, deploy to a new clien
     expect(v.checks.filter((c) => c.status === "fail")).toEqual([]);
     const tests = await testDeployment(clientCtx);
     expect(tests.find((t) => t.id === "media")?.status).toBe("pass");
+    expect(tests.find((t) => t.id === "media")?.message).toMatch(/pause, cut it, and rendered a 960×540/);
+    expect(tests.find((t) => t.id === "storage")?.status).toBe("pass");
+    expect(tests.filter((t) => t.status === "fail")).toEqual([]);
     expect(tests.find((t) => t.id === "dry.footage_to_publish")?.message).toMatch(/Skipped for this client: .*Generate metadata/);
     const diff = await deploymentDiff(clientCtx);
     expect(diff.diff.map((d) => d.path)).toContain("modules.publishing.enabled");

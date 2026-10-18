@@ -247,7 +247,7 @@ async function ReviewStep({ wsId, next }: { wsId: string; next: React.ReactNode 
 /** Which wizard step resolves a failed check. */
 function fixStep(checkId: string): number | null {
   if (checkId.startsWith("profile.")) return 3;
-  if (checkId.startsWith("int.") || checkId.startsWith("conn.")) return 4;
+  if (checkId.startsWith("int.") || checkId.startsWith("conn.") || checkId === "storage") return 4;
   if (checkId === "config" || checkId === "publish.auth") return 5;
   return null;
 }
