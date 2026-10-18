@@ -348,16 +348,21 @@ async function runConnectionCheck(ws: WorkspaceCtx, c: Connection): Promise<Chec
     }
     const { apiKey } = await readCredential<{ apiKey: string }>(c.credentialId!);
     if (c.provider === "anthropic") {
-      await new Anthropic({ apiKey, maxRetries: 0 }).models.list({ limit: 1 });
+      try {
+        await new Anthropic({ apiKey, maxRetries: 0 }).models.list({ limit: 1 });
+      } catch (e) {
+        if (e instanceof Anthropic.AuthenticationError) return { ok: false, message: `Anthropic rejected this API key (it is invalid, revoked or mistyped — stored key ends “${c.externalAccountName?.replace("…", "") ?? "?"}”). Disconnect it and add a key from console.anthropic.com → API keys.` };
+        throw e;
+      }
       return { ok: true, message: "Anthropic accepted the key." };
     }
     if (c.provider === "openai") {
       const r = await fetch("https://api.openai.com/v1/models", { headers: { authorization: `Bearer ${apiKey}` } });
-      return { ok: r.ok, message: r.ok ? "OpenAI accepted the key." : `OpenAI returned ${r.status}.` };
+      return { ok: r.ok, message: r.ok ? "OpenAI accepted the key." : r.status === 401 ? "OpenAI rejected this API key (invalid or revoked). Disconnect it and add a key from platform.openai.com → API keys." : `OpenAI returned ${r.status}.` };
     }
     if (c.provider === "deepgram") {
       const r = await fetch("https://api.deepgram.com/v1/projects", { headers: { authorization: `Token ${apiKey}` } });
-      return { ok: r.ok, message: r.ok ? "Deepgram accepted the key." : `Deepgram returned ${r.status}.` };
+      return { ok: r.ok, message: r.ok ? "Deepgram accepted the key." : r.status === 401 || r.status === 403 ? "Deepgram rejected this API key. Disconnect it and add a key from console.deepgram.com." : `Deepgram returned ${r.status}.` };
     }
     return { ok: false, message: "No check available for this provider." };
   } catch (err) {

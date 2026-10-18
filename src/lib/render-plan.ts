@@ -136,6 +136,9 @@ export function buildRenderPlan(opts: {
   if (edl.audio.noiseReduction !== "off") aChain.push(`afftdn=nr=${NR[edl.audio.noiseReduction]}:nf=-40`);
   if (edl.audio.normalize) aChain.push(`loudnorm=I=${edl.audio.targetLufs}:TP=-1.5:LRA=11`);
   aChain.push("aresample=48000");
+  // State the encoder's input format explicitly: FFmpeg 6 (the build bundled for Vercel) cannot
+  // negotiate the channel layout between loudnorm and the encoder on its own. libopus wants packed float.
+  aChain.push(`aformat=sample_fmts=${preset.container === "webm" ? "flt" : "fltp"}:sample_rates=48000:channel_layouts=stereo`);
   const graph = [...vf, `[0:a]${aChain.join(",")}[aout]`].join(";");
 
   const codec = preset.container === "webm"
